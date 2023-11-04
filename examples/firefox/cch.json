@@ -1,0 +1,10 @@
+{
+    "command": "{{HOME}}/firefox_bin/firefox",
+    "desktop_app": true,
+    "use_net": true,
+
+    "bind" : [
+        "{{HOME}}/firefox_bin",
+        "{{XDG_RUNTIME_DIR}}/pulse"
+    ]
+}

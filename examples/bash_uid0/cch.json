@@ -1,0 +1,9 @@
+{
+    "command": "bash",
+    "inherit_tty": true,
+    "inherit_path": true,
+    "as_uid0": true,
+
+    "bind" : [
+    ]
+}
