@@ -118,7 +118,7 @@ fn main() -> anyhow::Result<()> {
     let template = Template::new(&config, arg_dir);
 
     let bind_dirs = [
-        "/etc/resolv.conf",
+        "/etc/localtime",
         "/sys",
         "/lib",
         "/usr/lib",
@@ -126,6 +126,7 @@ fn main() -> anyhow::Result<()> {
         "/usr/lib64",
     ];
     let bind_dirs_desktop = ["/etc/fonts", "/usr/share"];
+    let bind_dirs_net = ["/etc/resolv.conf"];
 
     let mut bind_dirs: Vec<PathBuf> = bind_dirs.map(|s| PathBuf::from_str(s).unwrap()).to_vec();
     if has_true(&config.desktop_app) {
@@ -146,6 +147,10 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    if has_true(&config.use_net) {
+        bind_dirs.extend(bind_dirs_net.map(|s| PathBuf::from_str(s).unwrap()));
+    }
+
     if let Some(config_binds) = &config.bind {
         bind_dirs.extend(&mut config_binds.iter().map(|s| PathBuf::from_str(s).unwrap()));
     }
@@ -158,7 +163,9 @@ fn main() -> anyhow::Result<()> {
     bwrap.arg("--clearenv");
     bwrap.arg("--die-with-parent");
     bwrap.arg("--unshare-user");
-    bwrap.arg("--share-net");
+    if has_true(&config.use_net) {
+        bwrap.arg("--share-net");
+    }
     bwrap.arg("--dev").arg("/dev");
     bwrap.arg("--proc").arg("/proc");
     if has_true(&config.desktop_app) {
@@ -201,6 +208,7 @@ fn main() -> anyhow::Result<()> {
     if has_true(&config.desktop_app) {
         inherit_envs.extend([
             "GTK_IM_MODULE",
+            "GDK_IM_MODULE",
             "WAYLAND_DISPLAY",
             "XDG_RUNTIME_DIR",
             "XDG_SESSION_TYPE",
