@@ -102,10 +102,12 @@ fn main() -> anyhow::Result<()> {
     let mut dbus_proxy: Option<DBusProxy> = None;
 
     if has_true(&config.desktop_app) {
-        let db = spawn_dbus_proxy(temp_dir.path())?;
-        let mut buf = vec![0];
-        rustix::io::read(&db.sync_sock, &mut buf)?; // wait for dbus-proxy
-        dbus_proxy = Some(db);
+        if ! has_true(&config.full_dbus) {
+            let db = spawn_dbus_proxy(temp_dir.path())?;
+            let mut buf = vec![0];
+            rustix::io::read(&db.sync_sock, &mut buf)?; // wait for dbus-proxy
+            dbus_proxy = Some(db);
+        }
     }
 
     let (info_from_bwrap_rd, info_from_bwrap_wr) = rustix::pipe::pipe()?;
@@ -169,7 +171,7 @@ fn main() -> anyhow::Result<()> {
     bwrap.arg("--dev").arg("/dev");
     bwrap.arg("--proc").arg("/proc");
     if has_true(&config.desktop_app) {
-        bwrap.arg("--dev-bind").arg("/dev/dri").arg("/dev/dri");
+        bwrap.arg("--dev-bind").arg("/dev").arg("/dev");
     }
     bwrap.arg("--tmpfs").arg("/tmp");
     if let Some(dp) = &dbus_proxy {
@@ -182,6 +184,12 @@ fn main() -> anyhow::Result<()> {
             .arg("DBUS_SESSION_BUS_ADDRESS")
             .arg("unix:path=".to_owned() + dp.dbus_sock_path.to_str().unwrap());
     }
+    if has_true(&config.full_dbus) {
+        let mut dbus_path = PathBuf::from_str(&env::var("XDG_RUNTIME_DIR").unwrap()).unwrap();
+        dbus_path.push("bus");
+        bwrap.arg("--bind").arg(&dbus_path).arg(&dbus_path);
+    }
+
 
     if let Some(caps) = &config.caps {
         for c in caps {
@@ -213,6 +221,9 @@ fn main() -> anyhow::Result<()> {
             "XDG_RUNTIME_DIR",
             "XDG_SESSION_TYPE",
         ]);
+    }
+    if has_true(&config.full_dbus) {
+        inherit_envs.push("DBUS_SESSION_BUS_ADDRESS");
     }
 
     if has_true(&config.inherit_path) {
