@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub command: String,
     pub desktop_app: Option<bool>,
+    pub full_dbus: Option<bool>,
     pub use_net: Option<bool>,
     pub inherit_path: Option<bool>,
     pub inherit_lib: Option<bool>,
