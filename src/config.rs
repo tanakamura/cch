@@ -10,6 +10,7 @@ pub struct Config {
     pub as_uid0: Option<bool>,
     pub inherit_tty: Option<bool>,
     pub bind: Option<Vec<String>>,
+    pub dev_bind: Option<Vec<String>>,
     pub caps: Option<Vec<String>>,
 }
 

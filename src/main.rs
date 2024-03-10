@@ -117,6 +117,8 @@ fn main() -> anyhow::Result<()> {
 
     let template = Template::new(&config, arg_dir);
 
+    let mut dev_bind_dirs = Vec::<PathBuf>::new();
+
     let bind_dirs = [
         "/etc/localtime",
         "/sys",
@@ -154,6 +156,9 @@ fn main() -> anyhow::Result<()> {
     if let Some(config_binds) = &config.bind {
         bind_dirs.extend(&mut config_binds.iter().map(|s| PathBuf::from_str(s).unwrap()));
     }
+    if let Some(config_binds) = &config.dev_bind {
+        dev_bind_dirs.extend(&mut config_binds.iter().map(|s| PathBuf::from_str(s).unwrap()));
+    }
 
     for bind_dir in &bind_dirs {
         let bind_dir = template::substitute(bind_dir.to_str().unwrap(), &template);
@@ -171,6 +176,10 @@ fn main() -> anyhow::Result<()> {
     if has_true(&config.desktop_app) {
         bwrap.arg("--dev-bind").arg("/dev/dri").arg("/dev/dri");
     }
+    for db in &dev_bind_dirs {
+        bwrap.arg("--dev-bind").arg(&db).arg(&db);
+    }
+
     bwrap.arg("--tmpfs").arg("/tmp");
     if let Some(dp) = &dbus_proxy {
         bwrap
