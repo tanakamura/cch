@@ -12,8 +12,31 @@ use tempfile::tempdir;
 mod config;
 mod template;
 
-use config::{Config,has_true};
+use config::{has_true, Config};
 use template::Template;
+
+fn parse_args_from(args: impl IntoIterator<Item = String>) -> anyhow::Result<(PathBuf, bool)> {
+    let mut arg_dir = None;
+    let mut debug = false;
+
+    for arg in args {
+        if arg == "--debug" {
+            debug = true;
+        } else if arg.starts_with('-') {
+            return Err(anyhow::Error::msg(format!("unknown option: {arg}")));
+        } else if arg_dir.is_none() {
+            arg_dir = Some(PathBuf::from(arg));
+        } else {
+            return Err(anyhow::Error::msg(format!("unexpected argument: {arg}")));
+        }
+    }
+
+    let Some(arg_dir) = arg_dir else {
+        return Err(anyhow::Error::msg("usage: cch [--debug] <dir>"));
+    };
+
+    Ok((arg_dir, debug))
+}
 
 fn find_entry(name: &str, file: &Path) -> anyhow::Result<(i32, i32)> {
     for line in std::fs::read_to_string(file)?.lines() {
@@ -48,7 +71,56 @@ struct DBusProxy {
     dbus_sock_path: std::path::PathBuf,
 }
 
-fn spawn_dbus_proxy(temp_dir: &Path) -> anyhow::Result<DBusProxy> {
+fn default_mask_paths(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".ssh"),
+        home.join(".gnupg"),
+        home.join(".kube"),
+        home.join(".config").join("gcloud"),
+    ]
+}
+
+fn add_dbus_rules(dbus_proxy: &mut Command, config: &Config, minimal_dbus: bool) {
+    if minimal_dbus {
+        dbus_proxy.arg("--talk=org.freedesktop.IBus.*");
+        dbus_proxy.arg("--talk=org.fcitx.*");
+        dbus_proxy.arg("--talk=org.a11y.Bus");
+    } else {
+        dbus_proxy.arg("--talk=org.freedesktop.*");
+    }
+
+    if let Some(names) = &config.dbus_talk {
+        for name in names {
+            dbus_proxy.arg(format!("--talk={name}"));
+        }
+    }
+    if let Some(names) = &config.dbus_see {
+        for name in names {
+            dbus_proxy.arg(format!("--see={name}"));
+        }
+    }
+    if let Some(names) = &config.dbus_own {
+        for name in names {
+            dbus_proxy.arg(format!("--own={name}"));
+        }
+    }
+    if let Some(rules) = &config.dbus_call {
+        for (name, rule) in rules {
+            dbus_proxy.arg(format!("--call={name}={rule}"));
+        }
+    }
+    if let Some(rules) = &config.dbus_broadcast {
+        for (name, rule) in rules {
+            dbus_proxy.arg(format!("--broadcast={name}={rule}"));
+        }
+    }
+}
+
+fn spawn_dbus_proxy(
+    temp_dir: &Path,
+    config: &Config,
+    minimal_dbus: bool,
+) -> anyhow::Result<DBusProxy> {
     let dbus_path = temp_dir.join("dbus");
     let mut dbus_proxy = Command::new("xdg-dbus-proxy");
     let dbus_addr = env::var("DBUS_SESSION_BUS_ADDRESS");
@@ -64,7 +136,10 @@ fn spawn_dbus_proxy(temp_dir: &Path) -> anyhow::Result<DBusProxy> {
         dbus_proxy.arg(dbus_addr);
         dbus_proxy.arg(&dbus_path);
         dbus_proxy.arg("--filter");
-        dbus_proxy.arg("--talk=org.freedesktop.*");
+        if has_true(&config.dbus_log) {
+            dbus_proxy.arg("--log");
+        }
+        add_dbus_rules(&mut dbus_proxy, config, minimal_dbus);
         let fd_arg = format!("--fd=0");
         dbus_proxy.arg(fd_arg);
 
@@ -80,8 +155,8 @@ fn spawn_dbus_proxy(temp_dir: &Path) -> anyhow::Result<DBusProxy> {
 }
 
 fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = env::args().collect();
-    let arg_dir = std::path::Path::new(&args[1]);
+    let (arg_dir, debug_arg) = parse_args_from(env::args().skip(1))?;
+    let arg_dir = arg_dir.as_path();
 
     if !arg_dir.is_dir() {
         return Err(anyhow::Error::msg(format!(
@@ -96,14 +171,19 @@ fn main() -> anyhow::Result<()> {
     let config: Config = serde_json::from_reader(BufReader::new(config_file)).unwrap();
 
     let as_uid0 = has_true(&config.as_uid0);
+    let debug = debug_arg || has_true(&config.debug);
+    let inherit_path = debug || has_true(&config.inherit_path);
+    let inherit_tty = debug || has_true(&config.inherit_tty);
+    let use_dbus = config.dbus.unwrap_or(true);
+    let minimal_dbus = has_true(&config.minimal_dbus);
     let temp_dir = tempdir()?;
     let home = home::home_dir().unwrap();
 
     let mut dbus_proxy: Option<DBusProxy> = None;
 
-    if has_true(&config.desktop_app) {
-        if ! has_true(&config.full_dbus) {
-            let db = spawn_dbus_proxy(temp_dir.path())?;
+    if has_true(&config.desktop_app) && use_dbus {
+        if !has_true(&config.full_dbus) {
+            let db = spawn_dbus_proxy(temp_dir.path(), &config, minimal_dbus)?;
             let mut buf = vec![0];
             rustix::io::read(&db.sync_sock, &mut buf)?; // wait for dbus-proxy
             dbus_proxy = Some(db);
@@ -114,7 +194,7 @@ fn main() -> anyhow::Result<()> {
     let (userns_block_to_bwrap_rd, userns_block_to_bwrap_wr) = rustix::pipe::pipe()?;
 
     let mut bwrap = Command::new("bwrap");
-    bwrap.arg("--bind").arg(arg_dir.join("home")).arg(home);
+    bwrap.arg("--bind").arg(arg_dir.join("home")).arg(&home);
     bwrap.arg("--unshare-all");
 
     let template = Template::new(&config, arg_dir);
@@ -130,7 +210,13 @@ fn main() -> anyhow::Result<()> {
         "/usr/lib64",
     ];
     let bind_dirs_desktop = ["/etc/fonts", "/usr/share"];
-    let bind_dirs_net = ["/etc/resolv.conf"];
+    let bind_dirs_net = [
+        "/etc/resolv.conf",
+        "/etc/ssl",
+        "/etc/ca-certificates",
+        "/etc/pki",
+    ];
+    let mut bind_to_dirs: Vec<(PathBuf, PathBuf)> = vec![];
 
     let mut bind_dirs: Vec<PathBuf> = bind_dirs.map(|s| PathBuf::from_str(s).unwrap()).to_vec();
     if has_true(&config.desktop_app) {
@@ -141,9 +227,9 @@ fn main() -> anyhow::Result<()> {
         bind_dirs.push(wayland_path);
     }
 
-    if has_true(&config.inherit_path) {
+    if inherit_path {
         let path = std::env::var("PATH").unwrap();
-        for p in  path.split(':') {
+        for p in path.split(':') {
             let p = PathBuf::from_str(p).unwrap();
             if p.is_dir() {
                 bind_dirs.push(p);
@@ -152,9 +238,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     if has_true(&config.use_net) {
-        bind_dirs.extend(bind_dirs_net.map(|s| PathBuf::from_str(s).unwrap()));
+        for p in bind_dirs_net {
+            let p = PathBuf::from_str(p).unwrap();
+            if p.exists() {
+                bind_dirs.push(p);
+            }
+        }
     }
-
     if let Some(config_binds) = &config.bind {
         bind_dirs.extend(&mut config_binds.iter().map(|s| PathBuf::from_str(s).unwrap()));
     }
@@ -165,6 +255,26 @@ fn main() -> anyhow::Result<()> {
     for bind_dir in &bind_dirs {
         let bind_dir = template::substitute(bind_dir.to_str().unwrap(), &template);
         bwrap.arg("--bind").arg(&bind_dir).arg(&bind_dir);
+    }
+
+    if let Some(config_binds) = &config.bind_to {
+        bind_to_dirs.extend(&mut config_binds.iter().map(|(s, s2)| {
+            (
+                PathBuf::from_str(s).unwrap(),
+                PathBuf::from_str(s2).unwrap(),
+            )
+        }));
+    }
+    for bind_dir in &bind_to_dirs {
+        let bind_dir_src = template::substitute(bind_dir.0.to_str().unwrap(), &template);
+        let bind_dir_dst = template::substitute(bind_dir.1.to_str().unwrap(), &template);
+        bwrap.arg("--bind").arg(&bind_dir_src).arg(&bind_dir_dst);
+    }
+
+    // Hide common credential stores even if a broader HOME subtree is exposed later.
+    bwrap.arg("--dir").arg(home.join(".config"));
+    for mask_path in default_mask_paths(&home) {
+        bwrap.arg("--tmpfs").arg(mask_path);
     }
 
     bwrap.arg("--clearenv");
@@ -182,7 +292,11 @@ fn main() -> anyhow::Result<()> {
         bwrap.arg("--dev-bind").arg(&db).arg(&db);
     }
 
-    bwrap.arg("--tmpfs").arg("/tmp");
+    if has_true(&config.share_tmp) {
+        bwrap.arg("--bind").arg("/tmp").arg("/tmp");
+    } else {
+        bwrap.arg("--tmpfs").arg("/tmp");
+    }
     if let Some(dp) = &dbus_proxy {
         bwrap
             .arg("--bind")
@@ -193,12 +307,11 @@ fn main() -> anyhow::Result<()> {
             .arg("DBUS_SESSION_BUS_ADDRESS")
             .arg("unix:path=".to_owned() + dp.dbus_sock_path.to_str().unwrap());
     }
-    if has_true(&config.full_dbus) {
+    if has_true(&config.full_dbus) && use_dbus {
         let mut dbus_path = PathBuf::from_str(&env::var("XDG_RUNTIME_DIR").unwrap()).unwrap();
         dbus_path.push("bus");
         bwrap.arg("--bind").arg(&dbus_path).arg(&dbus_path);
     }
-
 
     if let Some(caps) = &config.caps {
         for c in caps {
@@ -207,7 +320,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     if as_uid0 {
-        if has_true(&config.inherit_tty) {
+        if inherit_tty {
             bwrap.arg("--userns-block-fd").arg("3"); //userns_block_to_bwrap_rd.as_raw_fd().to_string()
             bwrap.arg("--info-fd").arg("4"); // info_from_bwrap_wr.as_raw_fd().to_string();
         } else {
@@ -216,7 +329,7 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    if !has_true(&config.inherit_tty) {
+    if !inherit_tty {
         bwrap.arg("--new-session");
     }
 
@@ -231,11 +344,11 @@ fn main() -> anyhow::Result<()> {
             "XDG_SESSION_TYPE",
         ]);
     }
-    if has_true(&config.full_dbus) {
+    if has_true(&config.full_dbus) && use_dbus {
         inherit_envs.push("DBUS_SESSION_BUS_ADDRESS");
     }
 
-    if has_true(&config.inherit_path) {
+    if inherit_path {
         inherit_envs.push("PATH");
     }
 
@@ -248,10 +361,34 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    bwrap.arg(template::substitute(&config.command, &template));
+    if let Some(config_envs) = &config.env {
+        for (key, value) in config_envs {
+            bwrap
+                .arg("--setenv")
+                .arg(key)
+                .arg(template::substitute(value, &template));
+        }
+    }
+
+    if let Some(workdir) = &config.workdir {
+        bwrap
+            .arg("--chdir")
+            .arg(template::substitute(workdir, &template));
+    }
+
+    if debug {
+        bwrap.arg("bash");
+    } else {
+        bwrap.arg(template::substitute(&config.command, &template));
+        if let Some(argv) = &config.argv {
+            for arg in argv {
+                bwrap.arg(template::substitute(arg, &template));
+            }
+        }
+    }
 
     let mut fds = Vec::new();
-    if has_true(&config.inherit_tty) {
+    if inherit_tty {
         fds.extend([0, 1, 2]);
     }
 
