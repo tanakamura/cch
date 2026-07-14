@@ -1,7 +1,7 @@
 use rustache::{HashBuilder, Render};
 use std::io::Cursor;
 
-use crate::config::{Config,has_true};
+use crate::config::{has_true, Config};
 
 pub struct Template<'a> {
     tbl: HashBuilder<'a>,
@@ -11,7 +11,7 @@ impl<'a> Template<'a> {
     pub fn new(config: &Config, base_dir: &std::path::Path) -> Template<'a> {
         let mut tbl = HashBuilder::new().insert("base_dir", base_dir.to_str().unwrap());
 
-        if has_true(& config.desktop_app) {
+        if has_true(&config.desktop_app) {
             let xdg_runtime_dir = std::env::var("XDG_RUNTIME_DIR");
 
             if let Ok(xrd) = xdg_runtime_dir {
